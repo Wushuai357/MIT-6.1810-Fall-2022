@@ -1,0 +1,9 @@
+usertrap
+7 #exec a process
+user mode
+80001ff8: 00002683 lw a3,0(zero) # 0 <_entry-0x80000000>
+a3
+Because address 0 is not mapped in the kernel address space
+the scause value: 0x000000000000000d represents for Load access fault
+initcode\000\000\000\000\000\000\000
+1ß
