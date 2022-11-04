@@ -1,0 +1,5 @@
+SYS_fstat
+page0 contains TRAMPOLINE
+page2 contains USYSCALL
+no
+user process code and data

@@ -160,6 +160,16 @@ w_mideleg(uint64 x)
   asm volatile("csrw mideleg, %0" : : "r" (x));
 }
 
+// store the frame pointer of the currently executing 
+// function in the register s0
+static inline uint64
+r_fp()
+{
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r" (x) );
+  return x;
+}
+
 // Supervisor Trap-Vector Base Address
 // low two bits are mode.
 static inline void 

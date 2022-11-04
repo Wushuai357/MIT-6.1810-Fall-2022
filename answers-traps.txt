@@ -1,0 +1,10 @@
+a2
+26:	45b1                	li	a1,12
+24:	4635                	li	a2,13
+630
+38
+He110 World%
+0x00726c64
+no
+x=3 y=39660672%
+Becauese y is not initialized, so print function just print the value in the memory address of y, which is meaningless.
