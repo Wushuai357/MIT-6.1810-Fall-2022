@@ -99,15 +99,16 @@ struct proc {
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
-  uint64 timeintervals;        // time interval for sigalarm
-  uint64 timepassed;           // ticks passed since last exception
-  void (*handler)(void);             // pointer to exception handler function
   struct trapframe *trapframe; // data page for trampoline.S
-  struct trapframe prev;       // previous data page value
-  uint64 a0;                   // previous a0 
-  int alarm_lock;              // lock to prevent entering handler while handling
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // MIT LAB: Alarm
+  uint64 timeintervals;        // time interval for sigalarm
+  uint64 timepassed;           // ticks passed since last exception
+  void (*handler)(void);       // pointer to exception handler function
+  struct trapframe prev;       // previous data page value
+  int alarm_lock;              // lock to prevent entering handler while handling
 };

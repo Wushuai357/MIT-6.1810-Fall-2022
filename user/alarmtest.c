@@ -94,7 +94,7 @@ test1()
     foo(i, &j);
   }
   if(count < 10){
-    printf("\ntest1 failed: too few calls to the handler\n");
+    printf("\ntest1 failed: too few calls to the handler %d\n", count);
   } else if(i != j){
     // the loop should have called foo() i times, and foo() should
     // have incremented j once per call, so j should equal i.

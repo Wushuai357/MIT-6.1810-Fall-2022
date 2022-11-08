@@ -111,5 +111,5 @@ sys_sigreturn() {
   struct proc *p = myproc();
   *(p->trapframe) = p->prev;
   p->alarm_lock = 0;
-  return 0;
+  return p->trapframe->a0;
 }

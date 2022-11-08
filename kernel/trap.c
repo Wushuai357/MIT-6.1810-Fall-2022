@@ -57,13 +57,10 @@ void usertrap(void)
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
     p->trapframe->epc += 4;
-    // 保存调用系统调用时用户进程的 32 个寄存器值
-    p->prev = *(p->trapframe);
 
     // an interrupt will change sepc, scause, and sstatus,
     // so enable only now that we're done with those registers.
     intr_on();
-
     syscall();
   }
   else if ((which_dev = devintr()) != 0)
@@ -89,8 +86,10 @@ void usertrap(void)
       if (p->timepassed == p->timeintervals && p->alarm_lock == 0)
       {
         p->alarm_lock = 1;
-        p->trapframe->epc = (uint64)p->handler;
         p->timepassed = 0;
+        // 保存调用系统调用时用户进程的 32 个寄存器值
+        p->prev = *(p->trapframe);
+        p->trapframe->epc = (uint64)p->handler;
       }
     }
     yield();
