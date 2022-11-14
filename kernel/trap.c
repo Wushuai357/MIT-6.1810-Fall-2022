@@ -65,6 +65,10 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    uint64 va = r_stval();
+    if (cow_page_fault_handler(p->pagetable, va) == -1)
+      setkilled(p);
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -219,3 +223,49 @@ devintr()
   }
 }
 
+uint64
+cow_page_fault_handler(pagetable_t pagetable, uint64 va) {
+  pte_t *pte;
+  uint64 pa;
+  // uint flags;
+  char *mem;
+
+  if (va == 0 || va >= MAXVA) // invalid virtual address
+    return -1;
+  if ((pte = walk(pagetable, va, 0)) == 0) {
+    // panic("cow trap handler: walk");
+    return -1;
+  }
+  if ((*pte & PTE_V) == 0) {
+    // panic("cow trap handler: invalid PTE");
+    return -1;
+  }
+  if ((*pte & PTE_U) == 0) {
+    // panic("cow trap handler: segmentation fault");
+    return -1;
+  }
+  if ((*pte & PTE_W) != 0) {
+    return 0;
+  }
+  if ((*pte & PTE_COW) == 0) {
+    // panic("cow trap handler: write to read only page");
+    return -1;
+  }
+
+  // 1. 分配一个新的物理页
+  pa = PTE2PA(*pte);
+  if ((mem = kalloc()) == 0) {
+    printf("cow page fault hander: use up memory");
+    return -1;
+  }
+
+  // 2. 获取新物理页的 PTE 地址 赋给当前的 PTE 擦除 COW 位 增加写入权限
+  *pte = (PTE_FLAGS(*pte) & ~PTE_COW) | PTE_W | PA2PTE(mem);
+
+  // 3. 复制旧值到新物理页中
+  memmove(mem, (char*)pa, PGSIZE);
+
+  // 4. 递减对原有物理页面的引用计数
+  kfree((void *)pa);
+  return 0;
+}
