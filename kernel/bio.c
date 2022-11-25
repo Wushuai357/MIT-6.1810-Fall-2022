@@ -112,88 +112,92 @@ binit(void)
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
-// 1. 先用 GetBucket 找到相应的 bucket，然后在这个 bucket 中寻找 相应的 dev he blockno
-// 2. 能找到就返回相应的 b， 否则就得 对所有 bucket 进行遍历，采用 LRU 做 eviction
-// 在 eviction 中采取，总是只拿一个锁，来避免死锁问题
 static struct buf*
 bget(uint dev, uint blockno)
 {
+  int key;
   struct buf *b;
-  int key = getHashKey(dev, blockno);  // GetHashKey(dev, blockno);
-  struct BucketType *bucket = bucket = &bcache.buckets[key];
-  // Is the block already cached?
+  struct BucketType *bucket;
+
+  key = getHashKey(dev, blockno);
+  bucket = &bcache.buckets[key];
   acquire(&bucket->lock);
   for (b = bucket->head.next; b; b = b->next) {
     if (b->dev == dev && b->blockno == blockno) {
-      b->refcnt++;
+      ++b->refcnt;
       release(&bucket->lock);
-      acquiresleep(&b->lock);
-      return b;
+      // 保护 b 的缓冲区内容 确保只有一个进程在读写当前的缓冲区 b release 的时候释放该锁
+      acquiresleep(&b->lock); 
+      return b; 
     }
   }
   // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  // 我们得先释放bucket锁，不然在占用一个锁的情况下，再 acquire bucket.lock 会有死锁问题
+  // 先释放当前桶的锁 再去找最大的 timestamp 对应的桶的锁
+  // 如果不释放就去获取另一个锁 可能会导致死锁
   release(&bucket->lock);
 
-  // 下面是正式的 eviction，我们扫描所有的 bucket 然后找到最大的 timestamp，之后进行替换
-  struct buf *before_latest = 0;  // res 是我们要替换到这个 bucket 的节点
-  uint timestamp = 0; // timestamp 是最大的 b->timestamp, 也就是 LRU 算法了
-  struct BucketType *max_bucket = 0;  // b 所在的 bucket
-
-  for(int i = 0;i < BUCKETSIZE; ++ i) {
-    int find_better = 0;
-    struct BucketType *bucket = &bcache.buckets[i];
-    acquire(&bucket->lock);
-    // 遍历 per bucket
-    for (b = &bucket->head; b->next; b = b->next) {
+  // search through the buckets 
+  // Evict the least recently used buf
+  // which has the biggest time stamp
+  struct buf *before_to_be_evicted = 0; // buf before to be evicted buf because its a single linked-list
+  struct buf *to_be_evicetd = 0; // buf to be evicted
+  struct BucketType *bucket_to_be_evicted = 0; // bucket contains the to be evicted buf
+  uint timestamp = 0; // biggest time stamp
+  
+  for (int i = 0; i < BUCKETSIZE; ++i) {
+    // search through each bucket
+    struct BucketType* bkt = &bcache.buckets[i];
+    acquire(&bkt->lock);
+    int isfound = 0;
+    for (b = &bkt->head; b->next; b = b->next) {
       if (b->next->refcnt == 0 && b->next->timestamp >= timestamp) {
-          before_latest = b;
-          timestamp = b->next->timestamp;
-          find_better = 1;
+        before_to_be_evicted = b;
+        to_be_evicetd = b->next;
+        timestamp = to_be_evicetd->timestamp;
+        isfound = 1;
       }
     }
-    // 如果这个 bucket 中有更大 的 timestamp，那么我们就采用
-    // 注意，我们不能每一次都 release，对于持有最大的 timestamp 的 bucket，我们得一直保持lock
-    // 直到被替代，或者结束遍历
-    if (find_better) {
-      if (max_bucket != 0) release(&max_bucket->lock);
-      max_bucket = bucket;
-    } else
-      release(&bucket->lock);
+    if (isfound) {
+      if (bucket_to_be_evicted != 0) 
+        release(&bucket_to_be_evicted->lock); // 先释放之前持有的锁
+      bucket_to_be_evicted = bkt;
+    } else {
+      release(&bkt->lock);
+    }
   }
-  // 如果我们找到了 一个 buf，我们就先从这个桶删除 这个 buf
-  // 并释放锁
-  struct buf * res = before_latest->next;
-  if (res != 0) {
-    before_latest->next = before_latest->next->next;
-    release(&max_bucket->lock);
+
+  // 将要删除的 buf 从当前的链表中删除
+  if (to_be_evicetd != 0) {
+    before_to_be_evicted->next = to_be_evicetd->next;
+    release(&bucket_to_be_evicted->lock);
   }
-  // 现在我们将 拿到的 buf，插入到 需要 dev 的 bucket 中
+
+  // 将 buf 插入属于它的 bucket 中
   acquire(&bucket->lock);
-  if (res != 0) {
-    res->next = bucket->head.next;
-    bucket->head.next = res;
+  if (to_be_evicetd != 0) {
+    to_be_evicetd->next = bucket->head.next;
+    bucket->head.next = to_be_evicetd;
   }
-  // 如果有另一个线程先进入了 eviction，并且也正好是这个 dev 和 blockno，
-  // 我们再检查一遍，确保不会让 一个 dev 对应一个 buf
-  for (b = bucket->head.next; b ; b = b->next) {
+  // 重新检查一遍 确保不会有两个 def 对应一个 buf
+  for (b = bucket->head.next; b; b = b->next) {
     if (b->dev == dev && b->blockno == blockno) {
-      b->refcnt++;
+      ++b->refcnt;
       release(&bucket->lock);
       acquiresleep(&b->lock);
       return b;
     }
   }
-  if (res == 0) panic("bget: no buffers");
-  // 如果上面保证了还是找不到，那么就说明不会有重复，我们直接返回这个 buf（res)
-  res->valid = 0;
-  res->refcnt = 1;
-  res->dev = dev;
-  res->blockno = blockno;
+
+  if (to_be_evicetd == 0)
+    panic("bget: no buffers!");
+  // 如果检查没有异常 直接返回要驱逐的 buf
+  to_be_evicetd->valid = 0;
+  to_be_evicetd->refcnt = 1;
+  to_be_evicetd->dev = dev;
+  to_be_evicetd->blockno = blockno;
   release(&bucket->lock);
-  acquiresleep(&res->lock);
-  return res;
+  acquiresleep(&to_be_evicetd->lock);
+  return to_be_evicetd;
 }
 
 // Return a locked buf with the contents of the indicated block.
