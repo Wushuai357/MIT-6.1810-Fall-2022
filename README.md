@@ -2,7 +2,9 @@
 
 # Lab: System Calls
 
-### using GDB
+## using GDB
+
+### booting GDB
 在一个终端输入：make qemu-gdb ，启动GDB。
 在另一个终端输入：gdb-multiarch 或者 riscv64-linux-gnu-gdb。
 因为我的电脑是 20年的 M1 MacBookair，最后安装的 RISC-V 工具包是 riscv64-unknown-elf-gcc ，
@@ -57,3 +59,45 @@ kernel 之所以崩溃的原因，是因为 num 本来存的是要调用的系�
 
 指令：`p p→pid` 打印当前进程的 process id 。
 
+## trace
+当用户进程调用系统调用时，先被 `user/usys.pl` 编译后的 `usys.S` 文件阻塞，这个汇编文件里执行的操作为：
+
+1. riscv 指令集下 `li` 指令移动要执行的系统调用 number （定义在 `kernel/syscall.h` 中）到寄存器 a7 中
+2. 使用 riscv 指令集中的 `ecall` 激活系统调用
+3. 执行完系统调用后 `ret` 返回
+
+系统调用被声明在 `user/user.h` 文件中，所以，为了实现自己的系统调用，需要把该系统调用的声明也加在 `user/user.h` 文件中。
+
+进入内核模式后，会把系统调用导向在 `kernel/syscall.c` 和 `kernel/syscall.h` 中该系统调用函数对应的函数上。为了实现自己的系统调用，需要在 `kernel/syscall.h` 中定义该系统调用对应的 `syscall number`，然后在 `kernel/syscall.c` 的 syscalls 数组中把该系统调用加上，记得在数组前面的位置把该系统调用声明。
+
+实际当进入系统调用后，执行某一系统调用的函数在 `kernel/sysproc.c` 中，sys_trace 函数要实现在该文件中。
+xv6 中最初定义的 proc 结构体是没有 tracemask 这个参数的，所以需要在 proc 结构体的定义中加上。和进程相关的结构体、方法等定义在 kernel/proc.h 和 kernel/proc.c 文件中。此外，在 kernel/proc.c 文件的 fork() 函数中要多增加一下，fork 本来的功能是让父进程创建一个子进程，多增加一条把父进程的 tracemask 拷贝给子进程的 tracemask 的语句，这样，任意进程执行的时候，即使创建了子进程，子进程一样可以得到这个 tracemask 参数，然后看情况打印。
+`syscall[num]()` 代表执行系统调用号为 `num` 的系统调用，然后把返回值写入到寄存器 `a0`里，为了能够打印指定的系统调用及结果，取出当前进程的 tracemask 然后跟执行的进程号 num 求与，结果非零时打印对应系统调用的进程号，系统调用名称和结果。
+
+最后的最后，我参考的资料里这么说（虽然我自己没有遇到这个问题），trace 只希望在调用它的时候打印，而不希望正常的系统调用都打印，我参考的资料遇到了正常也打印的问题，他的解决方案是在 `kernel/proc.c` 文件中的 `freeproc` 函数里加一句，将 tracemask 置为 0.
+
+## sysinfo
+前面就照着 tips 里说的做，先把 sysinfo 系统调用的相关内容声明在系统调用各个文件中，可以参考前一个 trace 实验，注意系统调用函数的合理命名，否则调用的时候会出错。
+
+完成 sysinfo 总共需要做三个步骤：
+
+第一步 拷贝内核 sysinfo 到用户进程
+
+用户进程调用系统调用的时候提供了一个参数：`sysinfo*` 其实只是一个指向用户进程虚拟地址的指针，里面并没有实际的东西存在，利用 `copyout()` 函数把真实的信息写入到这个 `sysinfo*` 的地址里，数据类型为 `struct sysinfo` 的指针。
+
+关键在于 `copyout()` 的作用，它将内核的一些信息拷贝到用户进程中。`copyout()` 函数的用法参考了 `kernel/sysfile.c` 中的 `sys_fstat()` 函数和 `kernel/file.c` 中的 `filestat()` 函数。
+
+知道了怎么把数据从内核拷贝到用户进程，接下来就是去获取真正需要的数据，总共需要两个数据：
+
+1. 当前空闲的内存地址大小
+2. 当前非 `UNUSED` 状态的进程数量
+
+接下来分别在 `kernel/kalloc.c` 和 `kernel/proc.c` 写两个函数实现上述的两个功能，就可以在 `sysinfo` 系统调用中先调用上面两个函数获得真正的数据，然后再调用 `copyout` 写入用户进程中。
+
+第二步 获取空闲内存地址大小
+
+读了 RISC-V 的手册后得知：RISC-V 中内存地址以 page 的形式管理，每个 page 4096个字节，空闲的内存page 之间以空闲链表的形式存储，所以只需要用一个指针从遍历整个空闲链表计数，然后总数乘以单个 page 的大小，就是总的空闲内存大小。
+
+第三步 获取非 UNUSED 进程数
+
+观察进程的实现代码 proc.c 得知：进程管理在数组 proc 中，最大的进程数定义为 NPROC ，同样遍历整个数组，如果当前进程的状态不等于 UNUSED 就计数器++，最后返回。
