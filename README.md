@@ -3,7 +3,6 @@
 # Lab: System Calls
 
 ### using GDB
-##### boot GDB
 在一个终端输入：make qemu-gdb ，启动GDB。
 在另一个终端输入：gdb-multiarch 或者 riscv64-linux-gnu-gdb。
 因为我的电脑是 20年的 M1 MacBookair，最后安装的 RISC-V 工具包是 riscv64-unknown-elf-gcc ，
