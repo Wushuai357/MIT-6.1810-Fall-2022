@@ -81,6 +81,19 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define VMASIZE 16
+
+// 表示 mmap 映射的信息
+struct vma {
+  void *vstart;             // 映射的虚拟地址起始处 
+  uint64 sz;             // 映射的文件的大小
+  int prot;                  // PROT_READ or PROT_WRITE
+  int flags;                 // MAP_SHARED or MAP_PRIVATE
+  struct file *file ;        // The VMA should contain a pointer to a struct file for the file being mapped
+  uint64 offset;             // 映射文件的起始bit
+};
+
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +117,7 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  struct vma vmas[VMASIZE];     // 用于表示 mmap 映射的信息
+  uint64 mmapstart;            // mmap的起始位，mmap从上往下增长（映射多个文件时）,初始化(uint64)p->trapframe;
 };

@@ -5,6 +5,12 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "file.h"
+
 
 /*
  * the kernel's page table.
@@ -437,3 +443,158 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+char* mmap(void *addr, uint64 length, int prot, int flags,
+           int fd, uint64 offset);
+int munmap(void *addr, uint64 length);
+#define ALIGN_DOWN(x, a) ((x) & ~((typeof(x))(a)-1))
+#define ALIGN_UP(x,a) (((x)+(a)-1)&~(typeof(x))((a)-1))
+
+uint64 sys_mmap(void)
+{
+  uint64 addr;
+  uint64 sz;
+  int prot;
+  int flags;
+  int fd;
+  struct file *file;
+  uint64 offset;
+  argaddr(0, &addr);
+  argaddr(1, &sz);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argaddr(5, &offset);
+
+  struct proc *p = myproc();
+  if(fd < 0 || fd >= NOFILE || (file = p->ofile[fd]) == 0)
+    return -1;
+  if((!file->readable && (prot & (PROT_READ)))
+    || (!file->writable && (prot & PROT_WRITE) && !(flags & MAP_PRIVATE)))
+    return -1;
+
+  if(sz == 0) return 0xffffffffffffffff;
+  sz = PGROUNDUP(sz);
+
+  /** for test **/
+  // printf("--LOG current vms: ");
+  //  for(int i = 0;i < VMASIZE; ++ i) {
+  //    printf("%d ", p->vmas[i].sz);
+  //  }
+  // printf("\n");
+
+  // Assuming that ADDR is 0
+  if(addr == 0) {
+    p->mmapstart -= ALIGN_UP(sz, PGSIZE);
+    for(int i = 0;i < VMASIZE; ++ i) {
+      if(p->vmas[i].sz == 0) { // length 为 0可以当做是可用的 vma
+        p->vmas[i].vstart = (char*)p->mmapstart;
+        p->vmas[i].sz = sz;
+        p->vmas[i].prot = prot;
+        p->vmas[i].flags = flags;
+        p->vmas[i].file = file;
+        p->vmas[i].offset = offset;
+        break;
+      }else if((uint64)p->vmas[i].vstart <= p->mmapstart) {
+        printf("--LOG sys_mmap :expand %p to %p\n",p->vmas[i].vstart, p->vmas[i].vstart - sz);
+        p->vmas[i].vstart = (void*)(p->vmas[i].vstart - sz);
+        break;
+      }
+    }
+  }
+
+  filedup(file);
+  return p->mmapstart;
+}
+
+// Remove n BYTES (not pages) of vma mappings starting from va. va must be
+// page-aligned. The mappings NEED NOT exist.
+// Also free the physical memory and write back vma data to disk if necessary.
+pte_t *
+walk(pagetable_t pagetable, uint64 va, int alloc);
+/**
+ * @brief  uvmunmap + writei if vma->flags & MAP_SHARED
+ * 
+ * @param pagetable 
+ * @param va  
+ * @param nbytes 
+ * @param vma describe mmap content
+ */
+
+void
+vmaunmap(pagetable_t pagetable, uint64 va, uint64 nbytes, struct vma *vma, int lazy)
+{
+  pte_t *pte;
+
+  // borrowed from "uvmunmap"
+  uint64 offset = 0;
+  for(uint64 a = va; a < va + nbytes; a += PGSIZE){
+    offset = a - (uint64)vma->vstart;
+    if((pte = walk(pagetable, a, 0)) == 0)  {
+      if(lazy) {
+        continue;
+      }
+      panic("sys_munmap: walk");
+    }
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("sys_munmap: not a leaf");
+    if(*pte & PTE_V){
+      uint64 pa = PTE2PA(*pte);
+      if((*pte & PTE_D) && (vma->flags & MAP_SHARED)) { // dirty, need to write back to disk
+        begin_op();
+        ilock(vma->file->ip);
+          printf("-- LOG write in %d\n", offset);
+          writei(vma->file->ip, 0, pa, vma->offset + offset, PGSIZE);
+        iunlock(vma->file->ip);
+        end_op();
+      }
+      kfree((void*)pa);
+      *pte = 0;
+    }
+  }
+}
+
+uint64 sys_munmap(void)
+{
+  uint64 va;
+  uint64 length;
+  struct proc *p = myproc();
+  argaddr(0, &va);
+  argaddr(1, &length);
+
+  if(PGROUNDDOWN(va) != va) {
+    printf("not support not PGROUNDDOWN va\n");
+    return -1;
+  }
+  // 寻找 对应的 vma
+  struct vma *vma = findvma(p->vmas, va);
+
+  if(vma == 0) {
+    printf("sys_munmap : error va %lld\n", va);
+    return 1;
+  }
+
+  if(va > (uint64)vma->vstart && va + length < (uint64)vma->vstart + vma->sz) {
+    // trying to "dig a hole" inside the memory range.
+    return -1;
+  }
+  vmaunmap(p->pagetable, va, length, vma, 0);
+
+  // 向右移动起点
+  if((uint64)vma->vstart == PGROUNDDOWN(va)) {
+    vma->vstart = (char*)PGROUNDUP(va + length);
+  }
+  int sz = PGROUNDUP(va + length) - PGROUNDDOWN(va);
+  printf("--LOG munmap length %d se: %d    new: %d\n", vma->sz, sz, vma->sz - sz);
+  vma->sz -= sz;
+  // 清除映射
+  if(vma->sz <= 0) {
+    fileclose(vma->file);
+    printf("--LOG munmap length %d\n", vma->sz);
+    vma->sz = 0;
+  }
+  return 0;
+}
+
+
+

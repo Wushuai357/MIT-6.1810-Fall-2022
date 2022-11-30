@@ -145,6 +145,7 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->mmapstart = (uint64)p->trapframe;
 
   return p;
 }
@@ -158,6 +159,13 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  for(int i = 0; i < VMASIZE; i++) {
+    struct vma *vma = &p->vmas[i];
+    // 这里最后一个参数为1，是为了处理那种 从父进程 lazy 继承的页面，
+    // 那些页面是不需要 free 的，防止 walk 报错
+    if(vma->sz)
+      vmaunmap(p->pagetable, (uint64)vma->vstart, vma->sz, vma, 1);
+  }
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -169,6 +177,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->mmapstart = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -307,6 +316,17 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  // copy vmas created by mmap.
+  // lazy copy
+  for(i = 0; i < VMASIZE; i++) {
+    struct vma *vma = &p->vmas[i];
+    if(vma->sz) {
+      np->vmas[i] = *vma;
+      filedup(vma->file);
+    }
+  }
+  np->mmapstart = p->mmapstart;
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 

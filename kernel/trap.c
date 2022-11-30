@@ -5,6 +5,11 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
+
 
 struct spinlock tickslock;
 uint ticks;
@@ -27,6 +32,51 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+// find a vma using a virtual address inside that vma.
+struct vma *findvma(struct vma *vmas, uint64 va) {
+  for(int i = 0;i < VMASIZE;i++) {
+    if(vmas[i].sz && (uint64)vmas[i].vstart <= va
+        && (uint64)vmas[i].vstart + (uint64)vmas[i].sz > va) {
+      return &vmas[i];
+    }
+  }
+  return 0;
+}
+
+static int handleMmapFault(struct proc *p, uint64 va)
+{
+  va = PGROUNDDOWN(va);
+  if(va < p->sz) return 0; // 内存不足
+  struct vma * vma = findvma(p->vmas, va);
+  if(vma == 0) return 0;
+
+  // 分配新的内存页
+  void *pa = kalloc();
+  if(pa == 0) {
+    panic("handleMmapFault: kalloc");
+  }
+  memset(pa, 0, PGSIZE);
+  printf("--LOG handleMmapFault\n");
+  
+  begin_op();
+    ilock(vma->file->ip);
+      readi(vma->file->ip, 0, (uint64)pa, vma->offset + va - (uint64)vma->vstart, PGSIZE);
+    iunlock(vma->file->ip);
+  end_op();
+
+  // set appropriate perms, then map it.
+  int prot = PTE_U;
+  if(vma->prot & PROT_READ)
+    prot |= PTE_R;
+  if(vma->prot & PROT_WRITE) {
+    prot |= PTE_W;
+  }
+  if(mappages(p->pagetable, va, PGSIZE,
+    (uint64)pa, prot) < 0)
+    panic("vmalazytouch: mappages");
+  return 1;
 }
 
 //
@@ -67,6 +117,16 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 15 || r_scause() == 13) {
+    uint64 va = r_stval();
+    printf("--LOG p->pid: %d p->mmapstart:%p va: %p\n", p->pid, (uint64)p->mmapstart, va);
+    if(va >= p->mmapstart && va < TRAMPOLINE) {
+      if(!handleMmapFault(p, va)) {
+        p->killed = 1;
+      }
+    } else {
+       p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
